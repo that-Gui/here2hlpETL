@@ -1,0 +1,25 @@
+{
+  "name": "here2help-etl-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AWS Lambda ETL for exporting here2help Postgres data to Google Sheets.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "setup:env": "node -e \"const fs=require('node:fs'); if (fs.existsSync('.env')) { console.log('.env already exists; leaving it unchanged.'); } else { fs.copyFileSync('.env.example', '.env'); console.log('Created .env from .env.example. Fill in the Google credentials.'); }\"",
+    "invoke:local": "node -e \"const fs=require('node:fs'); if (!fs.existsSync('.env')) { console.error('Missing .env. Run npm run setup:env, then fill in Google credentials.'); process.exit(1); }\" && npm run build && node --env-file=.env -e \"require('./dist/index.js').handler().then((result) => console.log(JSON.stringify(result, null, 2))).catch((error) => { console.error(error); process.exit(1); })\"",
+    "package": "npm run build && cd dist && zip -r ../lambda.zip index.js"
+  },
+  "dependencies": {
+    "googleapis": "^173.0.0",
+    "pg": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.162",
+    "@types/node": "^25.9.2",
+    "@types/pg": "^8.20.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.3"
+  }
+}

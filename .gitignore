@@ -1,0 +1,7 @@
+node_modules/
+dist/
+lambda.zip
+.env
+.env.*
+!.env.example
+Steps.md
