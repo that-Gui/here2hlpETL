@@ -1,6 +1,6 @@
 # here2help ETL Lambda
 
-AWS Lambda that reads the `names` table from the `here2help` Postgres database using the read-only user and replaces the tab named by `GOOGLE_SHEET_TAB` in a designated Google Sheet.
+AWS Lambda that reads the `names` table from the `here2help` Postgres database using the read-only user and replaces the tab named by `GOOGLE_SHEET_TAB` in a designated Google Sheet. The export is a header row followed by the `id`, `first_name`, `last_name`, `nationality_id`, and `created_at` columns, ordered by `first_name`.
 
 ## Local Environment
 
@@ -13,7 +13,6 @@ H2H_DB_PORT=5432
 H2H_DB_DATABASE=here2help
 H2H_DB_USER=here_readonly
 H2H_DB_PASSWORD=help_readonly
-H2H_DB_SSLMODE=disable
 
 GOOGLE_SHEET_ID=your_google_sheet_id
 GOOGLE_SHEET_TAB=Export
@@ -21,7 +20,7 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL=your-service-account@your-project.iam.gserviceaccou
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nreplace_me\n-----END PRIVATE KEY-----\n"
 ```
 
-Every variable above is required: the Lambda throws `Missing required environment variable: <name>` at startup if one is missing or blank. The only optional variable is `H2H_DB_SSL_CA`, used when `H2H_DB_SSLMODE` is `verify-ca` or `verify-full` and the server's CA is not in Node's trust store (see `.env.example`).
+Every variable above is required: the Lambda throws `Missing required environment variable: <name>` at startup if one is missing or blank.
 
 Share the target Google Sheet with `GOOGLE_SERVICE_ACCOUNT_EMAIL` before invoking the Lambda.
 
@@ -51,3 +50,5 @@ npm run package
 This creates `lambda.zip` for upload to AWS Lambda.
 
 Use `index.handler` as the Lambda handler.
+
+The database connection does not use TLS: deploy the Lambda into the same VPC subnet as the database, and on AWS RDS make sure the parameter group does not enforce SSL (`rds.force_ssl=0`).

@@ -1,5 +1,4 @@
 import type { Handler } from "aws-lambda";
-import type { ConnectionOptions } from "node:tls";
 import { google, sheets_v4 } from "googleapis";
 import { Client } from "pg";
 
@@ -24,8 +23,6 @@ type Config = {
   dbDatabase: string;
   dbUser: string;
   dbPassword: string;
-  dbSslMode: string;
-  dbSslCa: string | undefined;
   googleSheetId: string;
   googleSheetTab: string;
   googleServiceAccountEmail: string;
@@ -62,8 +59,6 @@ function loadConfig(): Config {
     dbDatabase: getRequiredEnv("H2H_DB_DATABASE"),
     dbUser: getRequiredEnv("H2H_DB_USER"),
     dbPassword: getRequiredEnv("H2H_DB_PASSWORD"),
-    dbSslMode: getRequiredEnv("H2H_DB_SSLMODE").trim(),
-    dbSslCa: getOptionalPemEnv("H2H_DB_SSL_CA"),
     googleSheetId: getRequiredEnv("GOOGLE_SHEET_ID"),
     googleSheetTab: getRequiredEnv("GOOGLE_SHEET_TAB").trim(),
     googleServiceAccountEmail: getRequiredEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
@@ -83,16 +78,6 @@ function getRequiredEnv(name: string): string {
   return value;
 }
 
-function getOptionalPemEnv(name: string): string | undefined {
-  const value = process.env[name];
-
-  if (!value || value.trim().length === 0) {
-    return undefined;
-  }
-
-  return decodeEscapedNewlines(value);
-}
-
 function decodeEscapedNewlines(value: string): string {
   return value.replace(/\\n/g, "\n");
 }
@@ -104,7 +89,6 @@ async function fetchNamesRows(config: Config): Promise<DbRow[]> {
     database: config.dbDatabase,
     user: config.dbUser,
     password: config.dbPassword,
-    ssl: getSslConfig(config.dbSslMode, config.dbSslCa),
     connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
     statement_timeout: DB_STATEMENT_TIMEOUT_MS,
   });
@@ -140,35 +124,6 @@ function assertExportColumnsPresent(fieldNames: string[]): void {
     throw new Error(
       `Query result is missing expected column(s): ${missing.join(", ")}`,
     );
-  }
-}
-
-function getSslConfig(
-  dbSslMode: string,
-  dbSslCa: string | undefined,
-): false | ConnectionOptions {
-  const caOptions = dbSslCa === undefined ? {} : { ca: dbSslCa };
-
-  switch (dbSslMode.toLowerCase()) {
-    case "disable":
-      return false;
-    case "require":
-      // libpq parity: encrypt the connection without verifying the server.
-      return { rejectUnauthorized: false };
-    case "verify-ca":
-      // Chain verification without hostname checking; needs H2H_DB_SSL_CA for
-      // servers (like AWS RDS) whose CA is not in Node's default trust store.
-      return {
-        rejectUnauthorized: true,
-        checkServerIdentity: () => undefined,
-        ...caOptions,
-      };
-    case "verify-full":
-      return { rejectUnauthorized: true, ...caOptions };
-    default:
-      throw new Error(
-        `Unsupported H2H_DB_SSLMODE: "${dbSslMode}" (expected disable, require, verify-ca, or verify-full)`,
-      );
   }
 }
 
