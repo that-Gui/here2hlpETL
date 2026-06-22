@@ -3,8 +3,10 @@ import { google, sheets_v4 } from "googleapis";
 import { Client } from "pg";
 
 const EXPORTED_TABLE = "names";
+const PEOPLE_SHEET_TAB = "people";
 const DB_CONNECT_TIMEOUT_MS = 10_000;
 const DB_STATEMENT_TIMEOUT_MS = 30_000;
+const PEOPLE_HEADER_NAMES = new Set(["people", "name"]);
 
 const EXPORT_COLUMNS = [
   "id",
@@ -39,7 +41,8 @@ type HandlerResponse = {
 
 export const handler: Handler = async (): Promise<HandlerResponse> => {
   const config = loadConfig();
-  const rows = await fetchNamesRows(config);
+  const firstNames = await fetchPeopleFirstNamesFromSheet(config);
+  const rows = await fetchNamesRows(config, firstNames);
 
   await replaceGoogleSheetValues(config, rows);
 
@@ -82,7 +85,14 @@ function decodeEscapedNewlines(value: string): string {
   return value.replace(/\\n/g, "\n");
 }
 
-async function fetchNamesRows(config: Config): Promise<DbRow[]> {
+async function fetchNamesRows(
+  config: Config,
+  firstNames: string[],
+): Promise<DbRow[]> {
+  if (firstNames.length === 0) {
+    return [];
+  }
+
   const client = new Client({
     host: config.dbHost,
     port: config.dbPort,
@@ -96,7 +106,8 @@ async function fetchNamesRows(config: Config): Promise<DbRow[]> {
   await client.connect();
 
   try {
-    const result = await client.query<DbRow>(`
+    const result = await client.query<DbRow>(
+      `
       SELECT
         id,
         first_name,
@@ -104,8 +115,11 @@ async function fetchNamesRows(config: Config): Promise<DbRow[]> {
         nationality_id,
         created_at
       FROM names
+      WHERE lower(first_name) = ANY($1::text[])
       ORDER BY first_name;
-    `);
+    `,
+      [firstNames],
+    );
 
     assertExportColumnsPresent(result.fields.map((field) => field.name));
 
@@ -131,13 +145,7 @@ async function replaceGoogleSheetValues(
   config: Config,
   rows: DbRow[],
 ): Promise<void> {
-  const auth = new google.auth.JWT({
-    email: config.googleServiceAccountEmail,
-    key: config.googlePrivateKey,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-
-  const sheets = google.sheets({ version: "v4", auth });
+  const sheets = createGoogleSheetsClient(config);
   await ensureSheetTabExists(sheets, config);
 
   const clearRange = toSheetRange(config.googleSheetTab, "A:Z");
@@ -157,6 +165,63 @@ async function replaceGoogleSheetValues(
       values,
     },
   });
+}
+
+async function fetchPeopleFirstNamesFromSheet(
+  config: Config,
+): Promise<string[]> {
+  const sheets = createGoogleSheetsClient(config);
+  const result = await sheets.spreadsheets.values.get({
+    spreadsheetId: config.googleSheetId,
+    range: toSheetRange(PEOPLE_SHEET_TAB, "A:Z"),
+  });
+
+  return extractPeopleFirstNames(result.data.values ?? []);
+}
+
+function createGoogleSheetsClient(config: Config): sheets_v4.Sheets {
+  const auth = new google.auth.JWT({
+    email: config.googleServiceAccountEmail,
+    key: config.googlePrivateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+
+  return google.sheets({ version: "v4", auth });
+}
+
+function extractPeopleFirstNames(values: unknown[][]): string[] {
+  const [headers, ...rows] = values;
+
+  if (!headers) {
+    return [];
+  }
+
+  const peopleColumnIndex = headers.findIndex((header) =>
+    PEOPLE_HEADER_NAMES.has(normalizeSheetText(header).toLowerCase()),
+  );
+
+  if (peopleColumnIndex === -1) {
+    throw new Error(
+      `Missing ${PEOPLE_SHEET_TAB} sheet header: expected "people" or "name"`,
+    );
+  }
+
+  const firstNames = rows
+    .map((row) => firstToken(row[peopleColumnIndex]))
+    .filter((firstName): firstName is string => firstName !== undefined)
+    .map((firstName) => firstName.toLowerCase());
+
+  return [...new Set(firstNames)];
+}
+
+function firstToken(value: unknown): string | undefined {
+  const [token] = normalizeSheetText(value).split(/\s+/);
+
+  return token || undefined;
+}
+
+function normalizeSheetText(value: unknown): string {
+  return String(value ?? "").trim();
 }
 
 async function ensureSheetTabExists(
