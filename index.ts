@@ -2,22 +2,31 @@ import type { Handler } from "aws-lambda";
 import { google, sheets_v4 } from "googleapis";
 import { Client } from "pg";
 
-const EXPORTED_TABLE = "names";
-const PEOPLE_SHEET_TAB = "people";
+const EXPORTED_TABLE = "residents";
+const NAMES_SHEET_TAB = "names";
+const NAMES_HEADER_NAME = "names";
 const DB_CONNECT_TIMEOUT_MS = 10_000;
 const DB_STATEMENT_TIMEOUT_MS = 30_000;
-const PEOPLE_HEADER_NAMES = new Set(["people", "name"]);
 
 const EXPORT_COLUMNS = [
   "id",
   "first_name",
   "last_name",
-  "nationality_id",
-  "created_at",
+  "dob_day",
+  "dob_month",
+  "dob_year",
+  "contact_mobile_number",
+  "contact_telephone_number",
+  "email_address",
+  "uprn",
 ] as const;
 
 type ExportColumn = (typeof EXPORT_COLUMNS)[number];
 type DbRow = Record<ExportColumn, unknown>;
+type NameLookup = {
+  firstName: string;
+  lastName: string;
+};
 
 type Config = {
   dbHost: string;
@@ -41,8 +50,8 @@ type HandlerResponse = {
 
 export const handler: Handler = async (): Promise<HandlerResponse> => {
   const config = loadConfig();
-  const firstNames = await fetchPeopleFirstNamesFromSheet(config);
-  const rows = await fetchNamesRows(config, firstNames);
+  const names = await fetchNamesFromSheet(config);
+  const rows = await fetchNamesRows(config, names);
 
   await replaceGoogleSheetValues(config, rows);
 
@@ -87,11 +96,14 @@ function decodeEscapedNewlines(value: string): string {
 
 async function fetchNamesRows(
   config: Config,
-  firstNames: string[],
+  names: NameLookup[],
 ): Promise<DbRow[]> {
-  if (firstNames.length === 0) {
+  if (names.length === 0) {
     return [];
   }
+
+  const firstNames = names.map((name) => name.firstName);
+  const lastNames = names.map((name) => name.lastName);
 
   const client = new Client({
     host: config.dbHost,
@@ -109,16 +121,23 @@ async function fetchNamesRows(
     const result = await client.query<DbRow>(
       `
       SELECT
-        id,
-        first_name,
-        last_name,
-        nationality_id,
-        created_at
-      FROM names
-      WHERE lower(first_name) = ANY($1::text[])
-      ORDER BY first_name;
+        r.id,
+        r.first_name,
+        r.last_name,
+        r.dob_day,
+        r.dob_month,
+        r.dob_year,
+        r.contact_mobile_number,
+        r.contact_telephone_number,
+        r.email_address,
+        r.uprn
+      FROM residents r
+      JOIN unnest($1::text[], $2::text[]) AS requested_names(first_name, last_name)
+        ON lower(r.first_name) = requested_names.first_name
+        AND lower(r.last_name) = requested_names.last_name
+      ORDER BY r.first_name, r.last_name;
     `,
-      [firstNames],
+      [firstNames, lastNames],
     );
 
     assertExportColumnsPresent(result.fields.map((field) => field.name));
@@ -167,16 +186,14 @@ async function replaceGoogleSheetValues(
   });
 }
 
-async function fetchPeopleFirstNamesFromSheet(
-  config: Config,
-): Promise<string[]> {
+async function fetchNamesFromSheet(config: Config): Promise<NameLookup[]> {
   const sheets = createGoogleSheetsClient(config);
   const result = await sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheetId,
-    range: toSheetRange(PEOPLE_SHEET_TAB, "A:Z"),
+    range: toSheetRange(NAMES_SHEET_TAB, "A:Z"),
   });
 
-  return extractPeopleFirstNames(result.data.values ?? []);
+  return extractNames(result.data.values ?? []);
 }
 
 function createGoogleSheetsClient(config: Config): sheets_v4.Sheets {
@@ -189,35 +206,62 @@ function createGoogleSheetsClient(config: Config): sheets_v4.Sheets {
   return google.sheets({ version: "v4", auth });
 }
 
-function extractPeopleFirstNames(values: unknown[][]): string[] {
+function extractNames(values: unknown[][]): NameLookup[] {
   const [headers, ...rows] = values;
 
   if (!headers) {
     return [];
   }
 
-  const peopleColumnIndex = headers.findIndex((header) =>
-    PEOPLE_HEADER_NAMES.has(normalizeSheetText(header).toLowerCase()),
+  const namesColumnIndex = headers.findIndex(
+    (header) => normalizeSheetText(header).toLowerCase() === NAMES_HEADER_NAME,
   );
 
-  if (peopleColumnIndex === -1) {
-    throw new Error(
-      `Missing ${PEOPLE_SHEET_TAB} sheet header: expected "people" or "name"`,
-    );
+  if (namesColumnIndex === -1) {
+    throw new Error(`Missing ${NAMES_SHEET_TAB} sheet header: expected "names"`);
   }
 
-  const firstNames = rows
-    .map((row) => firstToken(row[peopleColumnIndex]))
-    .filter((firstName): firstName is string => firstName !== undefined)
-    .map((firstName) => firstName.toLowerCase());
+  const names = rows
+    .map((row) => parseName(row[namesColumnIndex]))
+    .filter((name): name is NameLookup => name !== undefined);
 
-  return [...new Set(firstNames)];
+  return uniqueNames(names);
 }
 
-function firstToken(value: unknown): string | undefined {
-  const [token] = normalizeSheetText(value).split(/\s+/);
+function parseName(value: unknown): NameLookup | undefined {
+  const normalizedValue = normalizeSheetText(value);
 
-  return token || undefined;
+  if (!normalizedValue) {
+    return undefined;
+  }
+
+  const parts = normalizedValue.split(/\s+/);
+
+  if (parts.length !== 2) {
+    return undefined;
+  }
+
+  const [firstName, lastName] = parts;
+
+  return {
+    firstName: firstName.toLowerCase(),
+    lastName: lastName.toLowerCase(),
+  };
+}
+
+function uniqueNames(names: NameLookup[]): NameLookup[] {
+  const seen = new Set<string>();
+
+  return names.filter((name) => {
+    const key = `${name.firstName}\0${name.lastName}`;
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeSheetText(value: unknown): string {
